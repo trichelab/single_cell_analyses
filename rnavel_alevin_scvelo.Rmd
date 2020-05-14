@@ -11,6 +11,7 @@ output:
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE, eval = FALSE)
+
 ```
 
 # Introduction
@@ -27,6 +28,9 @@ The analysis proceeds along the following steps:
 2. Downloading and indexing the genome
 3. Aligning your sequencing reads to intronic and exonic regions of the genome
 4. Performing the RNA Velocity calculation
+
+Finally, this document leans heavily on the [RNA Velocity With Alevin](https://combine-lab.github.io/alevin-tutorial/2020/alevin-velocity/)
+tutorial from the Combine lab. But it fills in some gaps, and demonstrates how to complete this analysis completely within an RMarkdown document without switching to an independent Python session.
 
 # Pre-requisites
 
@@ -162,6 +166,7 @@ req <- c("Biostrings",
          "scater", 
          "ggplot2", 
          "reshape2",
+         "org.Hs.eg.db",
          "foreach")
          
 
@@ -186,7 +191,7 @@ conda create -n salmon salmon
 
 ```
 
-Now the hard part is over. On to data analysis.
+Now the hard part is over. On to mapping and counting.
 
 # Genome index
 
@@ -201,7 +206,7 @@ are working with.
 #adjust as needed to point to where you want the data to be stored
 cd /mnt/data
 mkdir genomes
-mdkir genomes/hs38
+mdkir genomes/hs34
 
 ROOT_DIR=/mnt/data/genomes/hs38/
 cd $ROOT_DIR
@@ -222,7 +227,7 @@ depending on the lengths of your transcript reads).
 ```{r}
 # adjust as needed to point to where you want the indexes stored
 # don't forget the trailing slash
-root_dir <- "/mnt/data/genomes/hs38/"
+root_dir <- "/mnt/data/genomes/hs34/"
 
 gtf <- paste0(root_dir, "gencode.v34.annotation.gtf.gz")
 fasta <- paste0(root_dir, "GRCh38.primary_assembly.genome.fa")
@@ -287,4 +292,218 @@ salmon index \
 
 ```
 
+And create a linked transcriptome json config file with tximeta
 
+```{r}
+tximeta::makeLinkedTxome(
+  indexDir = paste0(root_dir, "gencode.vH34.annotation.expanded.sidx"), 
+  source = "GENCODE", genome = "GRCh38", 
+  organism = "Homo sapiens", release = "H34", 
+  fasta = paste0(root_dir, "GRCh38.primary_assembly.genome.expanded.fa"), 
+  gtf = paste0(root_dir, "gencode.vH34.annotation.expanded.gtf"), 
+  write = TRUE, jsonFile = paste0(root_dir, "genomes/gencode.vH34.annotation.expanded.json")
+)
+
+# check
+rjson::fromJSON(file = paste0(root_dir, "genomes/gencode.vH34.annotation.expanded.json"))
+
+```
+
+Now the hard part is over. Time to align some reads.
+
+# Aligning and counting
+
+Salmon alevin is designed to work with reads generated from 10X chromium chemistry. If you have 
+fastqs from V2 or V3 10X Chromium libraries, you are good to go. If you have fastqs with other 
+libraries with fixed length barcodes and UMIs, you are also good to go but will need to specify
+the barcode and UMI lengths and positions with the `--barcodeLength`, `--umiLength` and `--end` 
+parameters. 
+
+## Working with inDrop libraries
+
+What if you have inDrop libraries? The challenge with inDrop libraries is that Barcode 1 can be 
+8, 9, 10, or 11 bases long. Salmon alevin cannot deal with variable length barcodes. So, we have 
+developed a tool that will take inDrop fastqs and reformat them as if they were 10X genomics 
+fastqs, by trimming and/or padding the barcodes and UMIs. Because of the way the barcodes are 
+designed, this actually introduces little or no ambiguity in the barcodes, surprisingly enough.
+
+If you need to convert inDrop Fastqs, download the tool, build, and install.
+
+```{bash}
+cd ~/build
+curl -L https://github.com/vanandelinstitute/intent/archive/master.tar.gz -o intent.tar.gz
+tar -zxvf intent.tar.gz
+cd intent-master
+make
+
+# if you don't have root access, just copy bin/intent somewhere on your path.
+# of even just run it from bin/intent. But you can copy it to /usr/local/bin by:
+sudo make install
+```
+
+Then you can do something along the lines of:
+
+```{bash}
+intent Day100_inDrop_L000_R1_001.fastq.gz \
+       Day100_inDrop_L000_R2_001.fastq.gz 
+
+```
+
+## Mapping with alevin
+
+And map with alevin. Note that if you do not specify `--forceCells`, then alevin will 
+identify the "good" barcodes automatically using a knee plot. But sometimes that does 
+not go as expected. So specify your expected cells with `--forceCells` if possible.
+
+Also, if you are not using 10XGenomics chromium V2 style fastqs, you will need to specify
+something else in place of `--chromium`. For example, `--chromiumV3`, or explicitly specify 
+`--barcodeLength`, `--umiLength` and `--end` (where `--end` is either "5" or "3", specifying 
+which end the UMI is on relative to the barcode).
+
+```{bash}
+# specify your Read 1 and Read 2 fastq's below.
+# you can specify more than 1 for each if your library is split accross multiple
+# lanes/runs/etc.
+mkdir day60
+cd day60
+
+salmon alevin -l ISR -i ${ROOT_DIR}gencode.vH34.annotation.expanded.sidx \
+-1 day_60_R1.fastq.gz \
+-2 day_60_R2.fastq.gz \
+-o alevin_out -p 6 --tgMap ${ROOT_DIR}gencode.vH34.annotation.expanded.tx2gene.tsv \
+--dumpFeatures 
+--forceCells 1000 \
+--chromium
+
+```
+
+The hard part is over. On to calculating RNA Velocity
+
+# RNA Velocity
+
+We can then import the counts from `alevin` using the txiMeta package in R
+
+```{r}
+setwd("day60")
+
+tximeta::loadLinkedTxome(paste0(root_dir, "gencode.vH34.annotation.expanded.json"))
+txi <- tximeta::tximeta(coldata = data.frame(
+  names = "Day60",
+  files = "alevin_out/alevin/quants_mat.gz", 
+  stringsAsFactors = FALSE
+), type = "alevin")
+```
+
+We need to extract both the spliced and unspliced counts. 
+
+```{r}
+cg <- read.delim(paste0(root_dir, "gencode.vH34.annotation.expanded.features.tsv"),
+                 header = TRUE, as.is = TRUE)
+
+## Rename the 'intron' column 'unspliced' to make assay names compatible with scVelo
+colnames(cg)[colnames(cg) == "intron"] <- "unspliced"
+txis <- tximeta::splitSE(txi, cg, assayName = "counts")
+```
+
+Before we export our data into Python for scVelo, let's add some additional annotations that 
+will be useful, including both gene annotation and dimensional reductions.
+
+```{r}
+library(sceasy)
+library(org.Hs.eg.db)
+
+txis <- as(txis, "SingleCellExperiment")
+assays(txis) <- list(
+    counts = assay(txis, "spliced"),
+    spliced = assay(txis, "spliced"),
+    unspliced = assay(txis, "unspliced")
+)
+
+# annotate genes, discarding ones without annotation in org.Hs.eg.db
+ix <- which(gsub("\\..*", "", rownames(txis)) %in% ls(org.Hs.egENSEMBL2EG))
+txis <- txis[ix,]
+ens <- gsub("\\..*", "", rownames(txis))
+eg <- mget(ens, org.Hs.egENSEMBL2EG)
+eg <- sapply(eg, function(x) { x[1]})
+sym <- mget(eg, org.Hs.egSYMBOL)
+sym <- sapply(sym, function(x) { x[1]})
+rowData(txis)$symbol <- sym
+rowData(txis)$entrez <- eg
+rowData(txis)$ensembl <- ens
+
+txis <- scater::logNormCounts(txis)
+txis <- scater::runPCA(txis)
+txis <- scater::runTSNE(txis, dimred = "PCA")
+
+# let's save our work.
+saveRDS(txis, "txis.rds")
+```
+
+We can now extract the pieces we need to create an anndata 
+object that can be imported into a Python session via `reticulate`.
+
+```{r}
+library(reticulate)
+
+# adjust paths below as needed
+# see above for more information on installing miniconda
+use_condaenv("~/local/share/miniconda/envs/scvelo", 
+             conda = "~/local/share/miniconda/bin", 
+             required = TRUE)
+
+loompy <- reticulate::import('loompy')
+anndata <- reticulate::import('anndata', convert = FALSE)
+
+X <- Matrix::t(counts(txis))
+obs <- as.data.frame(colData(txis))
+var <- as.data.frame(rowData(txis))
+counts <- Matrix::t(assay(txis, "spliced"))
+spliced <- Matrix::t(assay(txis, "spliced"))
+unspliced <- Matrix::t(assay(txis, "unspliced"))
+logcounts <- Matrix::t(assay(txis, "logcounts"))
+X_PCA <- reducedDim(txis, "PCA")
+X_TSNE <- reducedDim(txis, "TSNE")
+
+adata <- anndata$AnnData(
+        X = X,
+        obs = obs,
+        var = var,
+        obsm = list(X_PCA = X_PCA,
+                    X_TSNE = X_TSNE),
+        layers = list(spliced = spliced, 
+                      unspliced = unspliced,
+                      logcounts = logcounts)
+)
+```
+
+Now we can drop into an Python session, accessing the `adata` object we just 
+created, and run scVelo on our dataset. Again, this can be done right within your 
+RMarkdown document, as RStudio now supports Python sessions "out of the box".
+
+```{python}
+import scvelo as scv
+import matplotlib
+matplotlib.use('AGG')
+scv.settings.set_figure_params('scvelo')
+
+# the anndata object we created above is available here in 
+# the 'r' namespace and can be imported by python
+scv.utils.show_proportions(r.adata)
+
+scv.pp.filter_genes(r.adata, min_shared_counts = 5)
+scv.pp.normalize_per_cell(r.adata, enforce = True)
+scv.pp.filter_genes_dispersion(r.adata, n_top_genes = 2000)
+scv.pp.log1p(r.adata)
+
+scv.pp.moments(r.adata, n_pcs = 30, n_neighbors = 30)
+
+scv.tl.recover_dynamics(r.adata)
+scv.pl.velocity_embedding_stream(r.adata, basis='X_TSNE', layer=['velocity'], color=['leiden'],
+                                dpi = 300, use_raw = True, save = 'stream1.png')
+```
+
+Voila!
+
+Next we will talk about some optimization including pseudocount inflation to better 
+normalize away the effect of library depth, merging multiple samples, and importing back 
+into R for further analysis and visualization.

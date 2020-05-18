@@ -21,8 +21,7 @@ grl <- eisaR::getFeatureRanges(
   intronType = "separate", 
   flankLength = 90L, 
   joinOverlappingIntrons = FALSE, 
-  verbose = TRUE
-)
+  verbose = TRUE)
 
 #extract the sequences of all features of interest
 genome <- Biostrings::readDNAStringSet("GRCh38.primary_assembly.genome.fa.gz")
@@ -52,4 +51,15 @@ write.table(
 df <- eisaR::getTx2Gene(
   grl, filepath = "gencode.v34.annotation.expanded.tx2gene.tsv"
 )
+
+#create a linked transcriptome with tximeta
+tximeta::makeLinkedTxome(
+  indexDir = "gencode.v34.annotation.expanded.sidx", 
+  source = "GENCODE", genome = "GRCh38", 
+  organism = "Homo sapiens", release = "v34", 
+  fasta = "gencode.v34.annotation.expanded.fa", 
+  gtf = "gencode.v34.annotation.expanded.gtf", 
+  write = TRUE, jsonFile = "gencode.v34.annotation.expanded.json"
+)
+rjson::fromJSON(file = "gencode.v34.annotation.expanded.json")
 

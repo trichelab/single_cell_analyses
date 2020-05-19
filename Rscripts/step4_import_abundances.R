@@ -53,6 +53,9 @@ txis <- scater::logNormCounts(txis)
 txis <- scater::runPCA(txis)
 txis <- scater::runTSNE(txis, dimred = "PCA")
 
+#save sce object as RDS
+saveRDS(txis, "BMMC_D1T1_txi_alevin_abundance.rds")
+
 #class: SingleCellExperiment 
 #dim: 60289 3137 
 #metadata(6): tximetaInfo quantInfo ... txomeInfo txdbInfo

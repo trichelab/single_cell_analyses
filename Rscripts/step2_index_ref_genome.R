@@ -15,6 +15,7 @@ suppressPackageStartupMessages({
 })
 
 #extract gRanges object containing genomic coordinates of each annotated transcript and intron
+gtf <- "gencode.vM24.annotation.gtf.gz"
 grl <- eisaR::getFeatureRanges(
   gtf = system.file("extdata/gencode.v34.annotation.gtf.gz", package = "eisaR"),
   featureType = c("spliced", "intron"), 
